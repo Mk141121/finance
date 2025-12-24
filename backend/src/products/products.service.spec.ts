@@ -341,4 +341,221 @@ describe('ProductsService', () => {
       expect(result.meta.total).toBe(0);
     });
   });
+
+  // ===== PHASE 3: BRANCH COVERAGE TESTS =====
+  describe('ProductsService - Branch Coverage', () => {
+    // ===== ERROR HANDLING BRANCHES =====
+    describe('Error Handling', () => {
+      it('should throw error when product not found for update', async () => {
+        jest.spyOn(repository, 'findOne').mockResolvedValue(null);
+        
+        await expect(service.update('invalid-id', { name: 'Test' }, 'user-1'))
+          .rejects.toThrow('Không tìm thấy sản phẩm');
+      });
+
+      it('should throw error when product not found for delete', async () => {
+        jest.spyOn(repository, 'findOne').mockResolvedValue(null);
+        
+        await expect(service.remove('invalid-id'))
+          .rejects.toThrow('Không tìm thấy sản phẩm');
+      });
+
+      it('should handle database connection error', async () => {
+        jest.spyOn(repository, 'findAndCount').mockRejectedValue(
+          new Error('Database connection failed')
+        );
+        
+        await expect(service.findAll({ page: 1, limit: 20 }))
+          .rejects.toThrow('Database connection failed');
+      });
+
+      it('should handle null/undefined ID gracefully', async () => {
+        jest.spyOn(repository, 'findOne').mockResolvedValue(null);
+        
+        await expect(service.findOne(null))
+          .rejects.toThrow('Không tìm thấy sản phẩm');
+      });
+
+      it('should throw error when code already exists', async () => {
+        const existingProduct = createMockProduct();
+        jest.spyOn(repository, 'findOne').mockResolvedValue(existingProduct);
+        
+        await expect(service.create({ code: existingProduct.code, name: 'Test' } as any, 'user-1'))
+          .rejects.toThrow('Mã sản phẩm đã tồn tại');
+      });
+    });
+
+    // ===== FILTERING BRANCHES =====
+    describe('Filtering Logic', () => {
+      it('should filter by categoryId when provided', async () => {
+        jest.spyOn(repository, 'findAndCount').mockResolvedValue([[mockProduct], 1]);
+        
+        await service.findAll({ categoryId: 'cat-123' });
+        
+        expect(repository.findAndCount).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({ categoryId: 'cat-123' })
+          })
+        );
+      });
+
+      it('should filter by type when provided', async () => {
+        jest.spyOn(repository, 'findAndCount').mockResolvedValue([[mockProduct], 1]);
+        
+        await service.findAll({ type: 'service' });
+        
+        expect(repository.findAndCount).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({ type: 'service' })
+          })
+        );
+      });
+
+      it('should filter by active status when isActive=true', async () => {
+        jest.spyOn(repository, 'findAndCount').mockResolvedValue([[mockProduct], 1]);
+        
+        await service.findAll({ isActive: 'true' });
+        
+        expect(repository.findAndCount).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({ isActive: true })
+          })
+        );
+      });
+
+      it('should filter by active status when isActive=false', async () => {
+        jest.spyOn(repository, 'findAndCount').mockResolvedValue([[], 0]);
+        
+        await service.findAll({ isActive: 'false' });
+        
+        expect(repository.findAndCount).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({ isActive: false })
+          })
+        );
+      });
+
+      it('should combine multiple filters', async () => {
+        jest.spyOn(repository, 'findAndCount').mockResolvedValue([[mockProduct], 1]);
+        
+        await service.findAll({ 
+          categoryId: 'cat-1',
+          type: 'product',
+          isActive: 'true',
+          search: 'laptop'
+        });
+        
+        expect(repository.findAndCount).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({
+              categoryId: 'cat-1',
+              type: 'product',
+              isActive: true
+            })
+          })
+        );
+      });
+
+      it('should handle empty filter object', async () => {
+        jest.spyOn(repository, 'findAndCount').mockResolvedValue([[mockProduct], 1]);
+        
+        await service.findAll({ page: 1, limit: 20 });
+        
+        expect(repository.findAndCount).toHaveBeenCalled();
+      });
+    });
+
+    // ===== IMPORT EXCEL BRANCHES =====
+    describe('Excel Import Logic', () => {
+      it('should throw error when file is null', async () => {
+        await expect(service.importFromExcel(null, 'user-1'))
+          .rejects.toThrow('File không được để trống');
+      });
+
+      it('should throw error when file is undefined', async () => {
+        await expect(service.importFromExcel(undefined, 'user-1'))
+          .rejects.toThrow('File không được để trống');
+      });
+
+      it('should handle empty Excel file', async () => {
+        const mockFile = {
+          buffer: Buffer.from('mock-empty-excel')
+        };
+        
+        // Mock xlsx to return empty data
+        jest.spyOn(require('xlsx'), 'read').mockReturnValue({
+          SheetNames: ['Sheet1'],
+          Sheets: {
+            Sheet1: {}
+          }
+        });
+        
+        jest.spyOn(require('xlsx').utils, 'sheet_to_json').mockReturnValue([]);
+        
+        const result = await service.importFromExcel(mockFile, 'user-1');
+        
+        expect(result.totalRows).toBe(0);
+        expect(result.successCount).toBe(0);
+      });
+    });
+
+    // ===== SOFT DELETE BRANCHES =====
+    describe('Soft Delete Logic', () => {
+      it('should soft delete product successfully', async () => {
+        const product = createMockProduct();
+        jest.spyOn(repository, 'findOne').mockResolvedValue(product);
+        jest.spyOn(repository, 'save').mockResolvedValue({ ...product, deletedAt: new Date(), isActive: false });
+        
+        await service.delete(product.id, 'tenant-1');
+        
+        expect(repository.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            deletedAt: expect.any(Date),
+            isActive: false
+          })
+        );
+      });
+
+      it('should throw error when product not found for soft delete', async () => {
+        jest.spyOn(repository, 'findOne').mockResolvedValue(null);
+        
+        await expect(service.delete('invalid-id', 'tenant-1'))
+          .rejects.toThrow('Không tìm thấy sản phẩm');
+      });
+    });
+
+    // ===== UPDATE BRANCHES =====
+    describe('Update Logic', () => {
+      it('should update product successfully', async () => {
+        const product = createMockProduct();
+        jest.spyOn(repository, 'findOne').mockResolvedValue(product);
+        jest.spyOn(repository, 'save').mockResolvedValue({ ...product, name: 'Updated Name' });
+        
+        const result = await service.update(product.id, { name: 'Updated Name' }, 'user-1');
+        
+        expect(result.name).toBe('Updated Name');
+        expect(repository.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            updatedBy: 'user-1'
+          })
+        );
+      });
+
+      it('should preserve existing fields when updating', async () => {
+        const product = createMockProduct();
+        const originalPrice = product.salePrice;
+        
+        jest.spyOn(repository, 'findOne').mockResolvedValue(product);
+        jest.spyOn(repository, 'save').mockResolvedValue({ ...product, name: 'New Name' });
+        
+        await service.update(product.id, { name: 'New Name' }, 'user-1');
+        
+        expect(repository.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            salePrice: originalPrice
+          })
+        );
+      });
+    });
+  });
 });
