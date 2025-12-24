@@ -2,15 +2,19 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, IsNull } from 'typeorm';
 import { Warehouse } from './entities/warehouse.entity';
 import { ProductBatch } from './entities/product-batch.entity';
 import { StockTransaction, StockTransactionType } from './entities/stock-transaction.entity';
 import { StockTransactionItem } from './entities/stock-transaction-item.entity';
 import { StockBalance } from './entities/stock-balance.entity';
+import { Adjustment, AdjustmentItem, AdjustmentStatus } from './entities/adjustment.entity';
 import { CreateStockTransactionDto } from './dto/create-stock-transaction.dto';
+import { CreateWarehouseDto, UpdateWarehouseDto } from './dto/warehouse.dto';
+import { CreateAdjustmentDto } from './dto/adjustment.dto';
 
 @Injectable()
 export class InventoryService {
@@ -25,25 +29,77 @@ export class InventoryService {
     private transactionItemsRepository: Repository<StockTransactionItem>,
     @InjectRepository(StockBalance)
     private balancesRepository: Repository<StockBalance>,
+    @InjectRepository(Adjustment)
+    private adjustmentsRepository: Repository<Adjustment>,
+    @InjectRepository(AdjustmentItem)
+    private adjustmentItemsRepository: Repository<AdjustmentItem>,
     private dataSource: DataSource,
   ) {}
 
   // ==================== WAREHOUSES ====================
   async findAllWarehouses(tenantId: string): Promise<Warehouse[]> {
     return await this.warehousesRepository.find({
-      where: { tenantId, deletedAt: null },
+      where: { tenantId, deletedAt: IsNull() },
       order: { code: 'ASC' },
     });
   }
 
   async findWarehouse(id: string, tenantId: string): Promise<Warehouse> {
     const warehouse = await this.warehousesRepository.findOne({
-      where: { id, tenantId, deletedAt: null },
+      where: { id, tenantId, deletedAt: IsNull() },
     });
     if (!warehouse) {
       throw new NotFoundException(`Warehouse with ID ${id} not found`);
     }
     return warehouse;
+  }
+
+  async createWarehouse(
+    createDto: CreateWarehouseDto,
+    tenantId: string,
+    userId: string,
+  ): Promise<Warehouse> {
+    // Check if warehouse code already exists
+    const existing = await this.warehousesRepository.findOne({
+      where: { code: createDto.code, tenantId, deletedAt: IsNull() },
+    });
+
+    if (existing) {
+      throw new ConflictException(`Warehouse with code ${createDto.code} already exists`);
+    }
+
+    const warehouse = this.warehousesRepository.create({
+      ...createDto,
+      tenantId,
+      createdBy: userId,
+    });
+
+    return await this.warehousesRepository.save(warehouse);
+  }
+
+  async updateWarehouse(
+    id: string,
+    updateDto: UpdateWarehouseDto,
+    tenantId: string,
+    userId: string,
+  ): Promise<Warehouse> {
+    const warehouse = await this.findWarehouse(id, tenantId);
+
+    // Check if new code conflicts with another warehouse
+    if (updateDto.code && updateDto.code !== warehouse.code) {
+      const existing = await this.warehousesRepository.findOne({
+        where: { code: updateDto.code, tenantId, deletedAt: IsNull() },
+      });
+
+      if (existing && existing.id !== id) {
+        throw new ConflictException(`Warehouse with code ${updateDto.code} already exists`);
+      }
+    }
+
+    Object.assign(warehouse, updateDto);
+    warehouse.updatedBy = userId;
+
+    return await this.warehousesRepository.save(warehouse);
   }
 
   // ==================== STOCK TRANSACTIONS ====================
@@ -352,5 +408,168 @@ export class InventoryService {
     }
 
     return transaction;
+  }
+
+  // ==================== ADJUSTMENTS ====================
+  async createAdjustment(
+    createDto: CreateAdjustmentDto,
+    tenantId: string,
+    userId: string,
+  ): Promise<Adjustment> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const { items, ...adjustmentData } = createDto;
+
+      // Generate adjustment code
+      const count = await this.adjustmentsRepository.count({ where: { tenantId } });
+      const year = new Date().getFullYear();
+      const code = `ADJ-${year}-${String(count + 1).padStart(5, '0')}`;
+
+      // Create adjustment
+      const adjustment = this.adjustmentsRepository.create({
+        ...adjustmentData,
+        code,
+        tenantId,
+        createdBy: userId,
+        status: AdjustmentStatus.DRAFT,
+      });
+
+      // Create items
+      const adjustmentItems: AdjustmentItem[] = [];
+      for (const item of items) {
+        const adjustmentItem = this.adjustmentItemsRepository.create({
+          ...item,
+          tenantId,
+        });
+        adjustmentItems.push(adjustmentItem);
+      }
+
+      adjustment.items = adjustmentItems;
+
+      const savedAdjustment = await queryRunner.manager.save(adjustment);
+
+      await queryRunner.commitTransaction();
+      return savedAdjustment;
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  async approveAdjustment(
+    id: string,
+    tenantId: string,
+    userId: string,
+  ): Promise<Adjustment> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const adjustment = await this.adjustmentsRepository.findOne({
+        where: { id, tenantId },
+        relations: ['items'],
+      });
+
+      if (!adjustment) {
+        throw new NotFoundException(`Adjustment with ID ${id} not found`);
+      }
+
+      if (adjustment.status !== AdjustmentStatus.DRAFT) {
+        throw new BadRequestException('Only draft adjustments can be approved');
+      }
+
+      // Update adjustment status
+      adjustment.status = AdjustmentStatus.APPROVED;
+      adjustment.approvedBy = userId;
+      adjustment.approvedAt = new Date();
+
+      // Process each item - create stock transactions
+      for (const item of adjustment.items) {
+        const differenceQty = Number(item.adjustedQuantity) - Number(item.currentQuantity);
+
+        if (differenceQty !== 0) {
+          // Create stock transaction for the adjustment
+          const transaction = this.transactionsRepository.create({
+            code: `${adjustment.code}-${item.productId}`,
+            type: differenceQty > 0 ? StockTransactionType.IN : StockTransactionType.OUT,
+            source: 'adjustment' as any,
+            warehouseId: item.warehouseId,
+            referenceType: 'adjustment',
+            referenceId: adjustment.id,
+            date: adjustment.adjustmentDate,
+            notes: `Stock adjustment: ${adjustment.reason}`,
+            status: 'confirmed',
+            tenantId,
+            createdBy: userId,
+            confirmedBy: userId,
+            confirmedAt: new Date(),
+          });
+
+          const transactionItem = this.transactionItemsRepository.create({
+            productId: item.productId,
+            quantity: Math.abs(differenceQty),
+            unit: 'pcs',
+            notes: item.notes,
+            tenantId,
+          });
+
+          transaction.items = [transactionItem];
+
+          await queryRunner.manager.save(transaction);
+
+          // Update stock balance
+          await this.updateStockBalance(
+            queryRunner,
+            tenantId,
+            item.productId,
+            item.warehouseId,
+            differenceQty,
+            0,
+          );
+        }
+      }
+
+      const savedAdjustment = await queryRunner.manager.save(adjustment);
+      await queryRunner.commitTransaction();
+
+      return savedAdjustment;
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  async rejectAdjustment(
+    id: string,
+    reason: string,
+    tenantId: string,
+    userId: string,
+  ): Promise<Adjustment> {
+    const adjustment = await this.adjustmentsRepository.findOne({
+      where: { id, tenantId },
+    });
+
+    if (!adjustment) {
+      throw new NotFoundException(`Adjustment with ID ${id} not found`);
+    }
+
+    if (adjustment.status !== AdjustmentStatus.DRAFT) {
+      throw new BadRequestException('Only draft adjustments can be rejected');
+    }
+
+    adjustment.status = AdjustmentStatus.REJECTED;
+    adjustment.rejectedBy = userId;
+    adjustment.rejectedAt = new Date();
+    adjustment.rejectionReason = reason;
+
+    return await this.adjustmentsRepository.save(adjustment);
   }
 }

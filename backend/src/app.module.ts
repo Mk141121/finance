@@ -13,6 +13,7 @@ import { PurchaseOrdersModule } from './purchase-orders/purchase-orders.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { AccountingModule } from './accounting/accounting.module';
 import { EInvoicesModule } from './e-invoices/e-invoices.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { TenantMiddleware } from './common/middleware/tenant.middleware';
 import { UserTenant } from './tenants/entities/user-tenant.entity';
 
@@ -57,6 +58,7 @@ import { UserTenant } from './tenants/entities/user-tenant.entity';
     InventoryModule,
     AccountingModule,
     EInvoicesModule,
+    DashboardModule,
   ],
 })
 export class AppModule implements NestModule {
