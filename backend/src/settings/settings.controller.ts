@@ -13,6 +13,12 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { SettingsService } from './settings.service';
 import { CreateSettingDto, UpdateSettingDto } from './dto/setting.dto';
+import {
+  UpdateCompanySettingsDto,
+  UpdateTaxSettingsDto,
+  UpdateInvoiceSettingsDto,
+  UpdateSystemSettingsDto,
+} from './dto/settings.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
 @ApiTags('settings')
@@ -23,14 +29,60 @@ export class SettingsController {
   constructor(private readonly settingsService: SettingsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Lấy tất cả cài đặt' })
+  @ApiOperation({ summary: 'Lấy tất cả cài đặt (grouped by category)' })
   @ApiQuery({ name: 'category', required: false })
-  async findAll(@Query('category') category?: string) {
-    const data = await this.settingsService.findAll(category);
-    return {
-      success: true,
-      data,
-    };
+  async findAll(@Request() req, @Query('category') category?: string) {
+    if (category) {
+      const data = await this.settingsService.findAll(category);
+      return { success: true, data };
+    }
+    // Return all settings grouped by category
+    const data = await this.settingsService.getAllSettings(req.user.tenantId);
+    return { success: true, data };
+  }
+
+  @Put('company')
+  @ApiOperation({ summary: 'Cập nhật thông tin công ty' })
+  async updateCompanySettings(@Request() req, @Body() dto: UpdateCompanySettingsDto) {
+    const data = await this.settingsService.updateCompanySettings(
+      dto,
+      req.user.tenantId,
+      req.user.userId,
+    );
+    return { success: true, data };
+  }
+
+  @Put('tax')
+  @ApiOperation({ summary: 'Cập nhật cài đặt thuế' })
+  async updateTaxSettings(@Request() req, @Body() dto: UpdateTaxSettingsDto) {
+    const data = await this.settingsService.updateTaxSettings(
+      dto,
+      req.user.tenantId,
+      req.user.userId,
+    );
+    return { success: true, data };
+  }
+
+  @Put('invoice')
+  @ApiOperation({ summary: 'Cập nhật cài đặt hóa đơn' })
+  async updateInvoiceSettings(@Request() req, @Body() dto: UpdateInvoiceSettingsDto) {
+    const data = await this.settingsService.updateInvoiceSettings(
+      dto,
+      req.user.tenantId,
+      req.user.userId,
+    );
+    return { success: true, data };
+  }
+
+  @Put('system')
+  @ApiOperation({ summary: 'Cập nhật cài đặt hệ thống' })
+  async updateSystemSettings(@Request() req, @Body() dto: UpdateSystemSettingsDto) {
+    const data = await this.settingsService.updateSystemSettings(
+      dto,
+      req.user.tenantId,
+      req.user.userId,
+    );
+    return { success: true, data };
   }
 
   @Get(':category/:key')

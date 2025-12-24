@@ -4,11 +4,12 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, IsNull } from 'typeorm';
 import { JournalEntry, JournalEntryType, JournalEntryStatus } from './entities/journal-entry.entity';
 import { JournalEntryLine } from './entities/journal-entry-line.entity';
 import { ChartOfAccount } from './entities/chart-of-account.entity';
 import { CreateJournalEntryDto } from './dto/create-journal-entry.dto';
+import { CreateAccountDto, UpdateAccountDto } from './dto/account.dto';
 
 @Injectable()
 export class AccountingService {
@@ -23,9 +24,201 @@ export class AccountingService {
   ) {}
 
   // ==================== CHART OF ACCOUNTS ====================
+  async getChartOfAccounts(tenantId: string) {
+    // Get all accounts
+    const accounts = await this.chartOfAccountsRepository.find({
+      where: { tenantId, deletedAt: IsNull() },
+      order: { accountCode: 'ASC' },
+    });
+
+    // Build tree structure
+    const accountMap = new Map();
+    const rootAccounts = [];
+
+    // First pass: create map
+    accounts.forEach((account) => {
+      accountMap.set(account.accountCode, {
+        ...account,
+        children: [],
+      });
+    });
+
+    // Second pass: build tree
+    accounts.forEach((account) => {
+      const node = accountMap.get(account.accountCode);
+      
+      if (account.parentCode) {
+        const parent = accountMap.get(account.parentCode);
+        if (parent) {
+          parent.children.push(node);
+        } else {
+          rootAccounts.push(node);
+        }
+      } else {
+        rootAccounts.push(node);
+      }
+    });
+
+    return rootAccounts;
+  }
+
+  async getAccount(id: string, tenantId: string) {
+    const account = await this.chartOfAccountsRepository.findOne({
+      where: { id, tenantId, deletedAt: IsNull() },
+    });
+
+    if (!account) {
+      throw new NotFoundException('Không tìm thấy tài khoản');
+    }
+
+    // Get account balance (sum of all journal entries)
+    const balance = await this.journalEntriesRepository
+      .createQueryBuilder('je')
+      .leftJoin('je.lines', 'line')
+      .select('SUM(line.debitAmount)', 'totalDebit')
+      .addSelect('SUM(line.creditAmount)', 'totalCredit')
+      .where('line.accountCode = :code', { code: account.accountCode })
+      .andWhere('je.tenantId = :tenantId', { tenantId })
+      .andWhere('je.status = :status', { status: 'posted' })
+      .getRawOne();
+
+    const totalDebit = parseFloat(balance?.totalDebit || '0');
+    const totalCredit = parseFloat(balance?.totalCredit || '0');
+    const netBalance = totalDebit - totalCredit;
+
+    return {
+      ...account,
+      balance: {
+        debit: totalDebit,
+        credit: totalCredit,
+        net: netBalance,
+      },
+    };
+  }
+
+  async createAccount(dto: CreateAccountDto, tenantId: string, userId: string) {
+    // Check duplicate code
+    const existing = await this.chartOfAccountsRepository.findOne({
+      where: { accountCode: dto.accountCode, tenantId, deletedAt: IsNull() },
+    });
+
+    if (existing) {
+      throw new BadRequestException('Mã tài khoản đã tồn tại');
+    }
+
+    // Validate parent account if specified
+    if (dto.parentAccountCode) {
+      const parent = await this.chartOfAccountsRepository.findOne({
+        where: { accountCode: dto.parentAccountCode, tenantId, deletedAt: IsNull() },
+      });
+
+      if (!parent) {
+        throw new NotFoundException('Không tìm thấy tài khoản cha');
+      }
+
+      // Parent must not be a detail account (parent must be summary/group)
+      if (parent.isDetail) {
+        throw new BadRequestException('Tài khoản cha phải là tài khoản tổng hợp');
+      }
+    }
+
+    const account = this.chartOfAccountsRepository.create({
+      tenantId,
+      accountCode: dto.accountCode,
+      accountName: dto.accountName,
+      accountType: dto.accountType,
+      parentCode: dto.parentAccountCode || null,
+      level: dto.level || 1,
+      isDetail: dto.isGroup ? false : true, // isGroup true => isDetail false
+      description: dto.description || null,
+      isActive: dto.isActive !== undefined ? dto.isActive : true,
+    });
+
+    return await this.chartOfAccountsRepository.save(account);
+  }
+
+  async updateAccount(
+    id: string,
+    dto: UpdateAccountDto,
+    tenantId: string,
+    userId: string,
+  ) {
+    const account = await this.chartOfAccountsRepository.findOne({
+      where: { id, tenantId, deletedAt: IsNull() },
+    });
+
+    if (!account) {
+      throw new NotFoundException('Không tìm thấy tài khoản');
+    }
+
+    // Check if account has been used in journal entries
+    const usageCount = await this.journalEntriesRepository
+      .createQueryBuilder('je')
+      .leftJoin('je.lines', 'line')
+      .where('line.accountCode = :code', { code: account.accountCode })
+      .andWhere('je.tenantId = :tenantId', { tenantId })
+      .getCount();
+
+    if (usageCount > 0) {
+      // Only allow updating name, description, isActive
+      account.accountName = dto.accountName;
+      account.description = dto.description;
+      account.isActive = dto.isActive ?? account.isActive;
+    } else {
+      // Allow all fields to be updated
+      account.accountName = dto.accountName;
+      account.accountType = dto.accountType;
+      account.parentCode = dto.parentAccountCode || null;
+      account.level = dto.level || account.level;
+      account.isDetail = dto.isGroup !== undefined ? !dto.isGroup : account.isDetail;
+      account.description = dto.description || account.description;
+      account.isActive = dto.isActive !== undefined ? dto.isActive : account.isActive;
+    }
+
+    return await this.chartOfAccountsRepository.save(account);
+  }
+
+  async deleteAccount(id: string, tenantId: string) {
+    const account = await this.chartOfAccountsRepository.findOne({
+      where: { id, tenantId, deletedAt: IsNull() },
+    });
+
+    if (!account) {
+      throw new NotFoundException('Không tìm thấy tài khoản');
+    }
+
+    // Check if account has been used
+    const usageCount = await this.journalEntriesRepository
+      .createQueryBuilder('je')
+      .leftJoin('je.lines', 'line')
+      .where('line.accountCode = :code', { code: account.accountCode })
+      .andWhere('je.tenantId = :tenantId', { tenantId })
+      .getCount();
+
+    if (usageCount > 0) {
+      throw new BadRequestException(
+        'Không thể xóa tài khoản đã được sử dụng trong bút toán',
+      );
+    }
+
+    // Check if account has children
+    const childCount = await this.chartOfAccountsRepository.count({
+      where: { parentCode: account.accountCode, tenantId, deletedAt: IsNull() },
+    });
+
+    if (childCount > 0) {
+      throw new BadRequestException('Không thể xóa tài khoản có tài khoản con');
+    }
+
+    // Soft delete
+    account.deletedAt = new Date();
+    await this.chartOfAccountsRepository.save(account);
+    return { message: 'Xóa tài khoản thành công' };
+  }
+
   async findAllAccounts(tenantId: string): Promise<ChartOfAccount[]> {
     return await this.chartOfAccountsRepository.find({
-      where: { tenantId, deletedAt: null },
+      where: { tenantId, deletedAt: IsNull() },
       order: { accountCode: 'ASC' },
     });
   }
@@ -35,7 +228,7 @@ export class AccountingService {
     accountCode: string,
   ): Promise<ChartOfAccount> {
     const account = await this.chartOfAccountsRepository.findOne({
-      where: { tenantId, accountCode, deletedAt: null },
+      where: { tenantId, accountCode, deletedAt: IsNull() },
     });
     if (!account) {
       throw new NotFoundException(`Account ${accountCode} not found`);

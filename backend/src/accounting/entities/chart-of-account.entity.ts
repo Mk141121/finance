@@ -44,8 +44,8 @@ export class ChartOfAccount {
   @Column({ type: 'int' })
   level: number;
 
-  @Column({ name: 'parent_id', type: 'uuid', nullable: true })
-  parentId: string;
+  @Column({ name: 'parent_code', length: 20, nullable: true })
+  parentCode: string;
 
   @Column({ name: 'is_detail', default: false })
   isDetail: boolean;
