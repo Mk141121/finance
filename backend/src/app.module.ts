@@ -14,6 +14,7 @@ import { InventoryModule } from './inventory/inventory.module';
 import { AccountingModule } from './accounting/accounting.module';
 import { EInvoicesModule } from './e-invoices/e-invoices.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { ReportsModule } from './reports/reports.module';
 import { TenantMiddleware } from './common/middleware/tenant.middleware';
 import { UserTenant } from './tenants/entities/user-tenant.entity';
 
@@ -59,6 +60,7 @@ import { UserTenant } from './tenants/entities/user-tenant.entity';
     AccountingModule,
     EInvoicesModule,
     DashboardModule,
+    ReportsModule,
   ],
 })
 export class AppModule implements NestModule {

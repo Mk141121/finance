@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
@@ -6,6 +6,7 @@ import * as bcrypt from 'bcrypt';
 import { User } from './entities/user.entity';
 import { UserTenant } from '../tenants/entities/user-tenant.entity';
 import { LoginDto, RegisterDto } from './dto/auth.dto';
+import { UpdateProfileDto, ChangePasswordDto } from './dto/profile.dto';
 
 @Injectable()
 export class AuthService {
@@ -141,5 +142,69 @@ export class AuthService {
     }
 
     return null;
+  }
+
+  async updateProfile(userId: string, dto: UpdateProfileDto) {
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('Không tìm thấy người dùng');
+    }
+
+    if (dto.fullName) user.fullName = dto.fullName;
+    if (dto.phone) user.phone = dto.phone;
+    if (dto.avatarUrl) user.avatarUrl = dto.avatarUrl;
+
+    await this.userRepository.save(user);
+
+    const { passwordHash: _, ...result } = user;
+    return result;
+  }
+
+  async changePassword(userId: string, dto: ChangePasswordDto) {
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('Không tìm thấy người dùng');
+    }
+
+    const isPasswordValid = await bcrypt.compare(dto.currentPassword, user.passwordHash);
+    if (!isPasswordValid) {
+      throw new BadRequestException('Mật khẩu hiện tại không đúng');
+    }
+
+    user.passwordHash = await bcrypt.hash(dto.newPassword, 10);
+    await this.userRepository.save(user);
+
+    return { message: 'Đổi mật khẩu thành công' };
+  }
+
+  async getActivityLogs(userId: string) {
+    // Return user's recent login history and activity
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+      select: ['id', 'email', 'lastLoginAt', 'createdAt'],
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('Không tìm thấy người dùng');
+    }
+
+    // Since we don't have activity_logs table, return basic activity info
+    return {
+      lastLogin: user.lastLoginAt,
+      accountCreated: user.createdAt,
+      activities: [
+        {
+          action: 'Đăng nhập',
+          timestamp: user.lastLoginAt,
+          details: 'Đăng nhập thành công',
+        },
+      ],
+    };
   }
 }
